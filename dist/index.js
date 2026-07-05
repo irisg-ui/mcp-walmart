@@ -1,15 +1,11 @@
 #!/usr/bin/env node
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
-const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
-const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
-const browser_js_1 = require("./browser.js");
-const session_js_1 = require("./session.js");
+import { Server, StdioServerTransport, } from "@modelcontextprotocol/server";
+import { withPage, navigateToWalmart, saveSessionCookies } from "./browser.js";
+import { isLoggedIn, loadAuth, saveAuth, clearCookies, saveAddress, loadAddress, } from "./session.js";
 // ─── Server setup ─────────────────────────────────────────────────────────────
-const server = new index_js_1.Server({ name: "walmart", version: "0.1.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "walmart", version: "0.1.0" }, { capabilities: { tools: {} } });
 // ─── Tool definitions ─────────────────────────────────────────────────────────
-server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
+server.setRequestHandler("tools/list", async () => ({
     tools: [
         {
             name: "status",
@@ -166,7 +162,8 @@ server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
             description: "Preview checkout summary for the Walmart cart. Returns order summary without placing the order.",
             inputSchema: {
                 type: "object",
-                properties: {},
+                properties: {
+                confirm: { type: "boolean", description: "Must be true to actually perform this action. Omit or false returns a preview and does nothing." },},
                 required: [],
             },
         },
@@ -186,8 +183,19 @@ server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
     ],
 }));
 // ─── Tool handlers ─────────────────────────────────────────────────────────────
-server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
+server.setRequestHandler("tools/call", async (request) => {
     const { name, arguments: args } = request.params;
+    // CONFIRM GATE (added post-publish): paid/irreversible actions short-circuit
+    // BEFORE any browser launch / login / network mutation when confirm !== true.
+    {
+        const __GATED = { "checkout": "place and pay for the order in your Walmart cart" };
+        if (__GATED[name] && (!args || args.confirm !== true)) {
+            return { content: [{ type: "text", text: JSON.stringify({
+                success: false, preview: true, action: name,
+                message: "PREVIEW ONLY — nothing was done and no browser was launched. This will " + __GATED[name] + ". Re-call " + name + " with confirm=true to actually proceed.",
+            }, null, 2) }] };
+        }
+    }
     const a = (args ?? {});
     try {
         switch (name) {
@@ -226,9 +234,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
 });
 // ─── Handler implementations ───────────────────────────────────────────────────
 async function handleStatus() {
-    const loggedIn = (0, session_js_1.isLoggedIn)();
-    const auth = (0, session_js_1.loadAuth)();
-    const address = (0, session_js_1.loadAddress)();
+    const loggedIn = isLoggedIn();
+    const auth = loadAuth();
+    const address = loadAddress();
     if (!loggedIn) {
         const lines = ["Not logged in. Use the `login` tool to authenticate with your Walmart account."];
         if (address) {
@@ -251,7 +259,7 @@ async function handleLogin(email, password, headless) {
     if (!email || !password) {
         return err("email and password are required");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/account/login", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -263,7 +271,7 @@ async function handleLogin(email, password, headless) {
             const text = await accountText.textContent();
             if (text && !text.toLowerCase().includes("sign in") && !text.toLowerCase().includes("log in")) {
                 const name = text.trim();
-                (0, session_js_1.saveAuth)({ email, loggedInAt: new Date().toISOString(), name });
+                saveAuth({ email, loggedInAt: new Date().toISOString(), name });
                 return ok(`Already logged in as ${name}`);
             }
         }
@@ -312,13 +320,13 @@ async function handleLogin(email, password, headless) {
         catch {
             // ignore
         }
-        await (0, browser_js_1.saveSessionCookies)();
-        (0, session_js_1.saveAuth)({ email, loggedInAt: new Date().toISOString(), name });
+        await saveSessionCookies();
+        saveAuth({ email, loggedInAt: new Date().toISOString(), name });
         return ok(`Successfully logged in as ${name ?? email}`);
     }, headless);
 }
 async function handleLogout() {
-    (0, session_js_1.clearCookies)();
+    clearCookies();
     return ok("Logged out. Session cookies cleared.");
 }
 async function handleSetAddress(zipCode, address) {
@@ -327,8 +335,8 @@ async function handleSetAddress(zipCode, address) {
     }
     const zipToUse = zipCode ?? address?.match(/\b\d{5}\b/)?.[0];
     const addressLabel = address ?? zipCode ?? "";
-    return (0, browser_js_1.withPage)(async (page) => {
-        await (0, browser_js_1.navigateToWalmart)(page, "/");
+    return withPage(async (page) => {
+        await navigateToWalmart(page, "/");
         try {
             // Click the delivery/location button in the header
             const locationBtn = await page.waitForSelector('[data-automation-id="fulfillment-address-button"], [aria-label*="Delivery to"], [aria-label*="Pickup"], button[class*="zip"]', { timeout: 10000 });
@@ -349,7 +357,7 @@ async function handleSetAddress(zipCode, address) {
             }
             await page.waitForTimeout(2000);
             // Save to session
-            (0, session_js_1.saveAddress)({
+            saveAddress({
                 address: addressLabel,
                 zip: zipToUse,
                 setAt: new Date().toISOString(),
@@ -358,7 +366,7 @@ async function handleSetAddress(zipCode, address) {
         }
         catch {
             // Fallback: save locally even if DOM interaction failed
-            (0, session_js_1.saveAddress)({
+            saveAddress({
                 address: addressLabel,
                 zip: zipToUse,
                 setAt: new Date().toISOString(),
@@ -370,7 +378,7 @@ async function handleSetAddress(zipCode, address) {
     });
 }
 async function handleSearch(query, minPrice, maxPrice, sortBy, limit = 10) {
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         const sortMap = {
             relevance: "best_match",
             price_low: "price_low",
@@ -452,7 +460,7 @@ async function handleGetProduct(url, itemId) {
     if (!url && !itemId) {
         return err("Provide either url or item_id");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         const targetUrl = url ?? `https://www.walmart.com/ip/${itemId}`;
         await page.goto(targetUrl, {
             waitUntil: "domcontentloaded",
@@ -525,7 +533,7 @@ async function handleAddToCart(url, itemId, quantity = 1) {
     if (!url && !itemId) {
         return err("Provide either url or item_id");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         const targetUrl = url ?? `https://www.walmart.com/ip/${itemId}`;
         await page.goto(targetUrl, {
             waitUntil: "domcontentloaded",
@@ -565,7 +573,7 @@ async function handleAddToCart(url, itemId, quantity = 1) {
     });
 }
 async function handleViewCart() {
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/cart", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -627,7 +635,7 @@ async function handleUpdateCart(itemId, productName, quantity) {
     if (!itemId && !productName) {
         return err("Provide either item_id or product_name to identify the cart item");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/cart", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -679,7 +687,7 @@ async function handleRemoveFromCart(itemId, productName) {
     if (!itemId && !productName) {
         return err("Provide either item_id or product_name to identify the cart item");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/cart", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -748,10 +756,10 @@ async function handleRemoveFromCart(itemId, productName) {
     });
 }
 async function handleCheckout() {
-    if (!(0, session_js_1.isLoggedIn)()) {
+    if (!isLoggedIn()) {
         return err("Not logged in. Use the `login` tool first.");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/cart", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -796,10 +804,10 @@ async function handleCheckout() {
     });
 }
 async function handleGetOrders(limit) {
-    if (!(0, session_js_1.isLoggedIn)()) {
+    if (!isLoggedIn()) {
         return err("Not logged in. Use the `login` tool first.");
     }
-    return (0, browser_js_1.withPage)(async (page) => {
+    return withPage(async (page) => {
         await page.goto("https://www.walmart.com/account/order-history", {
             waitUntil: "domcontentloaded",
             timeout: 30000,
@@ -854,7 +862,7 @@ function err(text) {
 }
 // ─── Start server ─────────────────────────────────────────────────────────────
 async function main() {
-    const transport = new stdio_js_1.StdioServerTransport();
+    const transport = new StdioServerTransport();
     await server.connect(transport);
     process.stderr.write("Walmart MCP server running on stdio\n");
 }

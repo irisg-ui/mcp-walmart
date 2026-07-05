@@ -1,13 +1,5 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.getBrowserContext = getBrowserContext;
-exports.getPage = getPage;
-exports.saveSessionCookies = saveSessionCookies;
-exports.closeBrowser = closeBrowser;
-exports.withPage = withPage;
-exports.navigateToWalmart = navigateToWalmart;
-const playwright_1 = require("playwright");
-const session_js_1 = require("./session.js");
+import { chromium } from "patchright";
+import { loadCookies, saveCookies } from "./session.js";
 // Stealth script to patch common bot-detection vectors
 const STEALTH_INIT_SCRIPT = `
   // Remove webdriver flag
@@ -48,10 +40,10 @@ const STEALTH_INIT_SCRIPT = `
 `;
 let browserInstance = null;
 let contextInstance = null;
-async function getBrowserContext(headless = true) {
+export async function getBrowserContext(headless = true) {
     if (contextInstance)
         return contextInstance;
-    browserInstance = await playwright_1.chromium.launch({
+    browserInstance = await chromium.launch({
         headless,
         args: [
             "--no-sandbox",
@@ -70,25 +62,25 @@ async function getBrowserContext(headless = true) {
         permissions: ["geolocation"],
     });
     // Restore saved cookies
-    const cookies = (0, session_js_1.loadCookies)();
+    const cookies = loadCookies();
     if (cookies && cookies.length > 0) {
         await contextInstance.addCookies(cookies);
     }
     return contextInstance;
 }
-async function getPage() {
+export async function getPage() {
     const ctx = await getBrowserContext();
     const page = await ctx.newPage();
     await page.addInitScript(STEALTH_INIT_SCRIPT);
     return page;
 }
-async function saveSessionCookies() {
+export async function saveSessionCookies() {
     if (!contextInstance)
         return;
     const cookies = await contextInstance.cookies();
-    (0, session_js_1.saveCookies)(cookies);
+    saveCookies(cookies);
 }
-async function closeBrowser() {
+export async function closeBrowser() {
     if (contextInstance) {
         await saveSessionCookies();
         await contextInstance.close();
@@ -99,7 +91,7 @@ async function closeBrowser() {
         browserInstance = null;
     }
 }
-async function withPage(fn, headless = true) {
+export async function withPage(fn, headless = true) {
     const ctx = await getBrowserContext(headless);
     const page = await ctx.newPage();
     await page.addInitScript(STEALTH_INIT_SCRIPT);
@@ -112,7 +104,7 @@ async function withPage(fn, headless = true) {
         await page.close();
     }
 }
-async function navigateToWalmart(page, path = "/") {
+export async function navigateToWalmart(page, path = "/") {
     const url = `https://www.walmart.com${path}`;
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(1500);

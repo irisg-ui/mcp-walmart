@@ -1,4 +1,4 @@
-import { BrowserContext, Page } from "playwright";
+import { BrowserContext, Page } from "patchright";
 export declare function getBrowserContext(headless?: boolean): Promise<BrowserContext>;
 export declare function getPage(): Promise<Page>;
 export declare function saveSessionCookies(): Promise<void>;
