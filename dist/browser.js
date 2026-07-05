@@ -1,78 +1,47 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { chromium } from "patchright";
 import { loadCookies, saveCookies } from "./session.js";
-// Stealth script to patch common bot-detection vectors
-const STEALTH_INIT_SCRIPT = `
-  // Remove webdriver flag
-  Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined,
-    configurable: true,
-  });
-
-  // Spoof plugins
-  Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-      const arr = [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-        { name: 'Native Client', filename: 'internal-nacl-plugin' },
-      ];
-      arr.__proto__ = PluginArray.prototype;
-      return arr;
-    },
-  });
-
-  // Spoof languages
-  Object.defineProperty(navigator, 'languages', {
-    get: () => ['en-US', 'en'],
-  });
-
-  // Patch permissions query
-  const origQuery = window.navigator.permissions.query;
-  window.navigator.permissions.query = (parameters) =>
-    parameters.name === 'notifications'
-      ? Promise.resolve({ state: Notification.permission, onchange: null })
-      : origQuery(parameters);
-
-  // Remove automation-related chrome properties
-  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-`;
-let browserInstance = null;
+// PATCHED 2026-07-04 (original in browser.js.orig):
+// - launchPersistentContext with a real profile dir so PerimeterX trust
+//   (earned by solving a challenge once) persists across restarts
+// - real Chrome channel when available; no spoofed UA, no JS stealth script,
+//   no timezone/geolocation spoofing — mismatches were bot signals
+// - always headful: headless is Walmart's strongest bot signal, and a visible
+//   window lets the user solve a challenge when one appears
+// - withPage detects the "Robot or human?" page and leaves it open to solve
+const PROFILE_DIR = path.join(os.homedir(), ".striderlabs", "walmart", "profile");
 let contextInstance = null;
-export async function getBrowserContext(headless = true) {
+export async function getBrowserContext(_headless = true) {
     if (contextInstance)
         return contextInstance;
-    browserInstance = await chromium.launch({
-        headless,
-        args: [
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--disable-infobars",
-            "--window-size=1280,800",
-        ],
-    });
-    contextInstance = await browserInstance.newContext({
-        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        viewport: { width: 1280, height: 800 },
-        locale: "en-US",
-        timezoneId: "America/Chicago",
-        geolocation: { latitude: 41.8781, longitude: -87.6298 }, // Chicago
-        permissions: ["geolocation"],
-    });
-    // Restore saved cookies
-    const cookies = loadCookies();
-    if (cookies && cookies.length > 0) {
-        await contextInstance.addCookies(cookies);
+    const firstRun = !fs.existsSync(path.join(PROFILE_DIR, "Default"));
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    const opts = {
+        headless: false,
+        viewport: null,
+        args: ["--disable-blink-features=AutomationControlled", "--window-size=1280,900"],
+    };
+    try {
+        contextInstance = await chromium.launchPersistentContext(PROFILE_DIR, { ...opts, channel: "chrome" });
+    }
+    catch {
+        contextInstance = await chromium.launchPersistentContext(PROFILE_DIR, opts);
+    }
+    // One-time migration: seed the new profile with the session saved under
+    // the old cookies.json scheme
+    if (firstRun) {
+        const cookies = loadCookies();
+        if (cookies && cookies.length > 0) {
+            await contextInstance.addCookies(cookies);
+        }
     }
     return contextInstance;
 }
 export async function getPage() {
     const ctx = await getBrowserContext();
-    const page = await ctx.newPage();
-    await page.addInitScript(STEALTH_INIT_SCRIPT);
-    return page;
+    return ctx.newPage();
 }
 export async function saveSessionCookies() {
     if (!contextInstance)
@@ -86,22 +55,34 @@ export async function closeBrowser() {
         await contextInstance.close();
         contextInstance = null;
     }
-    if (browserInstance) {
-        await browserInstance.close();
-        browserInstance = null;
+}
+async function looksChallenged(page) {
+    try {
+        if (/blocked/i.test(page.url()))
+            return true;
+        const txt = await page.evaluate(() => document.body?.innerText?.slice(0, 3000) || "");
+        return /robot or human|verify you are a human|press & hold|press and hold/i.test(txt);
+    }
+    catch {
+        return false;
     }
 }
-export async function withPage(fn, headless = true) {
-    const ctx = await getBrowserContext(headless);
+export async function withPage(fn, _headless = true) {
+    const ctx = await getBrowserContext();
     const page = await ctx.newPage();
-    await page.addInitScript(STEALTH_INIT_SCRIPT);
     try {
         const result = await fn(page);
         await saveSessionCookies();
+        await page.close();
         return result;
     }
-    finally {
-        await page.close();
+    catch (e) {
+        if (await looksChallenged(page)) {
+            // Leave the tab open so the user can solve the challenge there
+            throw new Error("Walmart is showing a 'Robot or human?' challenge. Solve it in the open browser window, then retry this tool call.");
+        }
+        await page.close().catch(() => { });
+        throw e;
     }
 }
 export async function navigateToWalmart(page, path = "/") {

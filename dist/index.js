@@ -276,7 +276,9 @@ async function handleLogin(email, password, headless) {
             }
         }
         // Fill email
-        const emailInput = await page.waitForSelector('input[name="email"], input[type="email"], #email', { timeout: 15000 });
+        // Long timeout: a "Robot or human?" challenge may precede the form and
+        // the user needs time to solve it in the visible window
+        const emailInput = await page.waitForSelector('input[name="email"], input[type="email"], #email', { timeout: 300000 });
         await emailInput.click();
         await emailInput.fill(email);
         // Click continue/next if present (some flows split email and password)
@@ -289,12 +291,19 @@ async function handleLogin(email, password, headless) {
             }
         }
         // Fill password
-        const passwordInput = await page.waitForSelector('input[name="password"], input[type="password"], #password', { timeout: 10000 });
+        const passwordInput = await page.waitForSelector('input[name="password"], input[type="password"], #password', { timeout: 120000 });
         await passwordInput.click();
         await passwordInput.fill(password);
         // Submit
         const submitBtn = await page.waitForSelector('button[type="submit"], button[data-automation-id="signin-submit-btn"]', { timeout: 5000 });
         await submitBtn.click();
+        // Allow time for a post-submit challenge or OTP step solved manually
+        try {
+            await page.waitForURL((u) => !/login|signin/i.test(u.toString()), { timeout: 120000 });
+        }
+        catch {
+            // fall through to the error/URL checks below
+        }
         await page.waitForTimeout(3000);
         // Check for error messages
         const errorEl = await page.$('[data-automation-id="signin-error-alert"], .error-message, [class*="error"], [role="alert"]');
@@ -339,7 +348,7 @@ async function handleSetAddress(zipCode, address) {
         await navigateToWalmart(page, "/");
         try {
             // Click the delivery/location button in the header
-            const locationBtn = await page.waitForSelector('[data-automation-id="fulfillment-address-button"], [aria-label*="Delivery to"], [aria-label*="Pickup"], button[class*="zip"]', { timeout: 10000 });
+            const locationBtn = await page.waitForSelector('[data-automation-id="fulfillment-address-button"], [aria-label*="Delivery to"], [aria-label*="Pickup"], button[class*="zip"], button[aria-label*="pickup or delivery" i], [data-automation-id="fulfillment-address"]', { timeout: 10000 });
             await locationBtn.click();
             await page.waitForTimeout(1000);
             // Look for ZIP input in the modal/dropdown
@@ -554,7 +563,7 @@ async function handleAddToCart(url, itemId, quantity = 1) {
             }
         }
         // Find and click Add to Cart button
-        const addBtn = await page.waitForSelector('button[data-automation-id="add-to-cart-btn"], button[data-tl-id*="add-to-cart"], [data-automation-id="atc-button"]', { timeout: 10000 });
+        const addBtn = await page.waitForSelector('button[data-automation-id="add-to-cart-btn"], button[data-tl-id*="add-to-cart"], [data-automation-id="atc-button"], button[data-automation-id="atc"], button[aria-label*="Add to cart" i], button:has-text("Add to cart")', { timeout: 20000 });
         const btnText = await addBtn.textContent();
         if (btnText?.toLowerCase().includes("out of stock") ||
             btnText?.toLowerCase().includes("unavailable") ||
@@ -563,6 +572,20 @@ async function handleAddToCart(url, itemId, quantity = 1) {
         }
         await addBtn.click();
         await page.waitForTimeout(3000);
+        // The quantity stepper usually only appears after the first add;
+        // click "+" the remaining times
+        if (quantity > 1) {
+            try {
+                for (let i = 1; i < quantity; i++) {
+                    const inc = await page.waitForSelector('button[data-automation-id="quantity-stepper-increase"], button[aria-label*="Increase quantity" i], button[aria-label*="increase" i]', { timeout: 5000 });
+                    await inc.click();
+                    await page.waitForTimeout(1200);
+                }
+            }
+            catch {
+                // stepper not found — quantity may have stayed at 1; verify via view_cart
+            }
+        }
         // Look for cart confirmation
         const confirmation = await page.$('[data-automation-id="cart-count"], [class*="cart-count"], [aria-label*="items in cart"]');
         const count = confirmation ? await confirmation.textContent() : null;

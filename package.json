@@ -1,17 +1,16 @@
 {
   "name": "@striderlabs/mcp-walmart",
-  "version": "0.2.1",
-  "description": "MCP server connector for Walmart retail shopping — search products, manage cart, track orders",
+  "version": "0.2.1-iris.1",
+  "description": "MCP server connector for Walmart retail shopping \u2014 search products, manage cart, track orders",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
     "mcp-walmart": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "echo 'dist/ is authoritative (no 0.2.1 source); do not rebuild from src/' && exit 1",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "prepare": "npm run build"
+    "start": "node dist/index.js"
   },
   "keywords": [
     "mcp",
